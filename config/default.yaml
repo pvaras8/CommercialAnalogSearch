@@ -1,0 +1,10 @@
+fingerprint:
+  kind: morgan
+  radius: 2
+  n_bits: 2048
+threshold: 0.80
+fallback_thresholds: [0.75, 0.70]
+max_results: null
+all_above_minimum: false
+n_workers: 1
+disk_chunk_size: 100000

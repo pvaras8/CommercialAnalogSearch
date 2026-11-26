@@ -1,0 +1,5 @@
+name: enamine
+reader: sdf
+commercial_id_property: Catalog_ID
+catalog_version_pattern: "(20[0-9]{4})"
+availability: historical_catalog_listing
