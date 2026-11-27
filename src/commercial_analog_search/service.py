@@ -6,7 +6,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from .config import SearchConfig
-from .export import export_log, export_results
+from .export import export_log, export_query_summary, export_results
 from .input import read_queries
 from .models import QueryMolecule, SearchMatch
 from .search import search_provider
@@ -17,9 +17,15 @@ LOG = logging.getLogger(__name__)
 class CommercialAnalogSearch:
     """Search one or more indexed commercial catalogues."""
 
-    def __init__(self, index_root: Path | str = "indices", config: SearchConfig | None = None):
+    def __init__(
+        self,
+        index_root: Path | str = "indices",
+        config: SearchConfig | None = None,
+        local_cache_root: Path | str | None = None,
+    ):
         self.index_root = Path(index_root)
         self.config = config or SearchConfig()
+        self.local_cache_root = Path(local_cache_root) if local_cache_root is not None else None
 
     def search(
         self, queries: list[QueryMolecule], providers: list[str]
@@ -29,7 +35,9 @@ class CommercialAnalogSearch:
         for query in queries:
             query_matches: list[SearchMatch] = []
             thresholds = (
-                [self.config.minimum_threshold]
+                [self.config.threshold]
+                if self.config.mode in {"fixed", "topk"}
+                else [self.config.minimum_threshold]
                 if self.config.all_above_minimum
                 else [self.config.threshold, *self.config.fallback_thresholds]
             )
@@ -50,7 +58,13 @@ class CommercialAnalogSearch:
                         continue
                     started = time.perf_counter()
                     try:
-                        found = search_provider(query, provider, self.index_root, level_config)
+                        found = search_provider(
+                            query,
+                            provider,
+                            self.index_root,
+                            level_config,
+                            self.local_cache_root,
+                        )
                         level_matches.extend(found)
                         provider_stats[provider]["matches"] = len(found)
                     except Exception as exc:
@@ -75,6 +89,8 @@ class CommercialAnalogSearch:
                     }
                 )
             query_matches.sort(key=lambda item: item.similarity, reverse=True)
+            if self.config.mode == "topk":
+                query_matches = query_matches[: self.config.top_k]
             if self.config.max_results is not None:
                 query_matches = query_matches[: self.config.max_results]
             matches.extend(query_matches)
@@ -99,6 +115,7 @@ class CommercialAnalogSearch:
         destination = Path(output)
         stats = export_results(queries, matches, destination)
         export_log(logs, destination)
+        export_query_summary(queries, matches, logs, self.config, destination)
         return {
             **stats,
             "queries": len(queries),

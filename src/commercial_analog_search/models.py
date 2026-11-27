@@ -33,3 +33,4 @@ class SearchMatch:
     catalog_version: str
     availability_status: str = "historical_catalog_listing"
     product_url: str = ""
+    fingerprint: str = "morgan-r2-n2048"

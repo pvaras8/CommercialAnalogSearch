@@ -6,6 +6,10 @@ The project supports CPython 3.11, 3.12 and 3.14 on Linux x86-64 and tests those
 
 No CUDA dependency is installed. The search path deliberately uses FPSim2's CPU/on-disk implementation. GPUs are not requested because this workload is well served by CPU POPCNT and the requested deployment prioritises CPU.
 
+The deployed environment is Mirmidon (Rocky Linux 9.5, glibc 2.34, 64 physical CPUs, about 188 GB RAM and four NVIDIA GPUs) with the Mamba environment `commercial_search`. Rocky's glibc satisfies the wheel requirement.
+
+The existing Enamine 202610 Morgan index contains 4,824,873 molecules and was built with Python 3.12, RDKit 2026.9.2 and FPSim2 0.7.4 in 82 minutes 16 seconds. In the initial 84-query PockLigGPT run, no Morgan hit reached 0.70; observed maximum similarities were 0.5000 (6PCF), 0.6207 (4AH6) and 0.6508 (8PPR). Fixed-threshold and exact top-k modes are provided to explore this lower-similarity regime explicitly rather than silently changing scientific interpretation.
+
 The dependency matrix is:
 
 | Dependency | Python 3.11 | Python 3.12 | Python 3.14 | Linux notes |
@@ -17,14 +21,11 @@ The dependency matrix is:
 
 ## Installation
 
-Run from a login node in the cloned repository. Replace the module names with those used by the cluster:
+Activate the existing Mamba environment from the cloned repository:
 
 ```bash
-module purge
-module load Python/3.12
-
-python -m venv .venv
-source .venv/bin/activate
+source "$(conda info --base)/etc/profile.d/conda.sh"
+conda activate commercial_search
 python -m pip install --upgrade pip
 python -m pip install -e '.[dev]'
 pytest
@@ -39,7 +40,7 @@ The 10,000-record measurement produced a 2.12 MB HDF5 index and 3.49 MB SQLite s
 
 Index RAM is bounded by streaming SDF parsing and FPSim2's 32,000-record write batch. Provision 4 GB minimum and 8 GB conservatively. Index construction is mostly sequential: ZIP/SDF parsing, RDKit standardisation, FPSim2 fingerprint construction and final PyTables sorting do not expose a useful worker count in FPSim2 0.7.4. More CPUs will not materially accelerate this step.
 
-Search uses FPSim2 `on_disk_similarity`, which uses a process pool when `--cpus` is greater than one. With `--chunk-size 100000`, raw fingerprint blocks are roughly 27 MB per active process; process/RDKit/PyTables overhead and concurrent I/O make 16 GB RAM a safe starting request for 60 CPUs. If the job approaches its memory limit, reduce `--chunk-size` to 50000 or reduce `--cpus`. Performance can become storage-I/O-bound before reaching 60 CPUs, so benchmark 16, 32 and 60 on the cluster filesystem.
+Search uses FPSim2 on-disk methods, which use a process pool when `--cpus` is greater than one. With `--chunk-size 100000`, raw fingerprint blocks are roughly 27 MB per active process; process/RDKit/PyTables overhead and concurrent I/O make 16 GB RAM a safe starting request for 64 CPUs. If the job approaches its memory limit, reduce `--chunk-size` to 50000 or reduce `--cpus`. Performance can become storage-I/O-bound before reaching 64 CPUs, so benchmark 16, 32 and 64 on the cluster filesystem.
 
 ## Validate and build
 
@@ -55,13 +56,14 @@ commercial-search index \
   --limit 10000
 ```
 
-Do not build the full index until validation is accepted. The eventual production command is:
+The existing full Morgan production index must not be rebuilt. For a future catalogue, publish to a new versioned root:
 
 ```bash
 commercial-search index \
   --provider enamine \
-  --input data/raw/enamine/ \
-  --index-root indices/production
+  --input data/raw/enamine/202701/ \
+  --index-root indices/enamine-202701 \
+  --scratch-root "/tmp/${USER}/commercial-search-build"
 ```
 
 Example Slurm script for the eventual full build:
@@ -76,24 +78,108 @@ Example Slurm script for the eventual full build:
 
 set -euo pipefail
 source .venv/bin/activate
-commercial-search index --provider enamine --input data/raw/enamine/ --index-root indices/production
+commercial-search index --provider enamine --input data/raw/enamine/202701/ --index-root indices/enamine-202701 --scratch-root "/tmp/${USER}/commercial-search-build"
 ```
 
-## Search with up to 60 CPUs
+## Existing production index and node-local storage
+
+The completed Morgan index contains 4,824,873 molecules from catalogue 202610 and remains in the original layout. Do not move or rebuild it. Passing `--fingerprint morgan --radius 2 --bits 2048` resolves that legacy layout directly.
+
+SQLite locking on LUSTRE/NFS is not disabled. Instead, `--scratch-root` builds and validates all three index files on local XFS before copying them with Python's standard library (no `rsync`). `--local-cache` validates and copies a persistent index to local storage for searching, or reuses it when catalogue version, row count, timestamp and fingerprint metadata match.
+
+Use a job-specific or user-specific local directory with adequate space:
 
 ```bash
-source .venv/bin/activate
+export COMMERCIAL_SEARCH_SCRATCH="/tmp/${USER}/commercial-search-build"
+export COMMERCIAL_SEARCH_LOCAL_CACHE="/tmp/${USER}/commercial-search-cache"
+mkdir -p "$COMMERCIAL_SEARCH_SCRATCH" "$COMMERCIAL_SEARCH_LOCAL_CACHE"
+```
+
+## Exact production commands
+
+### 1. Reuse the existing Morgan index
+
+```bash
+conda activate commercial_search
 
 commercial-search search \
   --input 6PCF_PockLigGPT_predictions_DeNovo_filtradas.csv \
   --providers enamine \
   --threshold 0.80 \
   --min-threshold 0.70 \
-  --cpus 60 \
+  --fingerprint morgan \
+  --radius 2 \
+  --bits 2048 \
+  --cpus 64 \
   --chunk-size 100000 \
   --index-root indices/production \
+  --local-cache "$COMMERCIAL_SEARCH_LOCAL_CACHE" \
   --output outputs/6pcf-commercial-analogues/
 ```
+
+### 2. Build an independent RDKit Path index
+
+This command leaves `indices/production/enamine/fingerprints.h5` untouched and publishes the new index below `indices/production/enamine/indexes/rdkit-min1-max7-n2048/`:
+
+```bash
+commercial-search index \
+  --provider enamine \
+  --input data/raw/enamine/ \
+  --index-root indices/production \
+  --fingerprint rdkit \
+  --min-path 1 \
+  --max-path 7 \
+  --bits 2048 \
+  --scratch-root "$COMMERCIAL_SEARCH_SCRATCH"
+```
+
+### 3. Retrieve the exact top 20
+
+```bash
+commercial-search search \
+  --input molecules.csv \
+  --providers enamine \
+  --mode topk \
+  --top-k 20 \
+  --fingerprint morgan \
+  --cpus 64 \
+  --index-root indices/production \
+  --local-cache "$COMMERCIAL_SEARCH_LOCAL_CACHE" \
+  --output outputs/top20-morgan/
+```
+
+### 4. Search at a fixed threshold
+
+```bash
+commercial-search search \
+  --input molecules.csv \
+  --providers enamine \
+  --mode fixed \
+  --threshold 0.50 \
+  --fingerprint rdkit \
+  --min-path 1 \
+  --max-path 7 \
+  --cpus 64 \
+  --index-root indices/production \
+  --local-cache "$COMMERCIAL_SEARCH_LOCAL_CACHE" \
+  --output outputs/rdkit-fixed-050/
+```
+
+### 5. Compare Morgan and RDKit Path
+
+```bash
+commercial-search compare \
+  --input molecules.csv \
+  --providers enamine \
+  --mode topk \
+  --top-k 20 \
+  --cpus 64 \
+  --index-root indices/production \
+  --local-cache "$COMMERCIAL_SEARCH_LOCAL_CACHE" \
+  --output outputs/fingerprint-comparison/
+```
+
+The comparison directory contains individual Morgan and RDKit result trees, union-based `fingerprint_comparison.csv`, and a unique commercial `pipeline_input.csv`.
 
 Omit `--max-results` to return every hit at the first successful threshold. Add, for example, `--max-results 100` to cap the combined result set across all selected providers for each query.
 
@@ -102,14 +188,14 @@ Example Slurm search request:
 ```bash
 #!/usr/bin/env bash
 #SBATCH --job-name=cas-search
-#SBATCH --cpus-per-task=60
+#SBATCH --cpus-per-task=64
 #SBATCH --mem=16G
 #SBATCH --time=04:00:00
 #SBATCH --output=logs/search-%j.out
 
 set -euo pipefail
-source .venv/bin/activate
-commercial-search search --input molecules.csv --providers enamine --cpus "${SLURM_CPUS_PER_TASK}" --index-root indices/production --output outputs/run-001/
+conda activate commercial_search
+commercial-search search --input molecules.csv --providers enamine --mode topk --top-k 20 --cpus "${SLURM_CPUS_PER_TASK}" --index-root indices/production --local-cache "/tmp/${USER}/commercial-search-cache" --output outputs/run-001/
 ```
 
 ## Updating a provider catalogue
@@ -120,14 +206,15 @@ Never overwrite the production catalogue or index in place. Store the new archiv
 commercial-search index \
   --provider enamine \
   --input data/raw/enamine/202701/ \
-  --index-root indices/enamine-202701 \
-  --limit 10000
+  --index-root indices/enamine-202701-validation \
+  --limit 10000 \
+  --scratch-root "$COMMERCIAL_SEARCH_SCRATCH"
 
 commercial-search index \
   --provider enamine \
   --input data/raw/enamine/202701/ \
   --index-root indices/enamine-202701 \
-  --force
+  --scratch-root "$COMMERCIAL_SEARCH_SCRATCH"
 
 commercial-search search \
   --input validation_queries.csv \

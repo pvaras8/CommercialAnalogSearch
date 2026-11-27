@@ -20,7 +20,9 @@ def fingerprint(smiles: str, config: FingerprintConfig):
     gen = (
         rdFingerprintGenerator.GetMorganGenerator(radius=config.radius, fpSize=config.n_bits)
         if config.kind == "morgan"
-        else rdFingerprintGenerator.GetRDKitFPGenerator(fpSize=config.n_bits)
+        else rdFingerprintGenerator.GetRDKitFPGenerator(
+            minPath=config.min_path, maxPath=config.max_path, fpSize=config.n_bits
+        )
     )
     return gen.GetFingerprint(mol)
 

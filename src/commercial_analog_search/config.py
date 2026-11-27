@@ -12,6 +12,8 @@ class FingerprintConfig:
     kind: Literal["morgan", "rdkit"] = "morgan"
     radius: int = 2
     n_bits: int = 2048
+    min_path: int = 1
+    max_path: int = 7
 
     @property
     def fpsim2_type(self) -> str:
@@ -22,12 +24,27 @@ class FingerprintConfig:
         return (
             {"radius": self.radius, "fpSize": self.n_bits}
             if self.kind == "morgan"
-            else {"fpSize": self.n_bits}
+            else {"minPath": self.min_path, "maxPath": self.max_path, "fpSize": self.n_bits}
         )
+
+    @property
+    def slug(self) -> str:
+        if self.kind == "morgan":
+            return f"morgan-r{self.radius}-n{self.n_bits}"
+        return f"rdkit-min{self.min_path}-max{self.max_path}-n{self.n_bits}"
+
+    def as_dict(self) -> dict[str, int | str]:
+        values: dict[str, int | str] = {"kind": self.kind, "n_bits": self.n_bits}
+        if self.kind == "morgan":
+            values["radius"] = self.radius
+        else:
+            values.update({"min_path": self.min_path, "max_path": self.max_path})
+        return values
 
 
 @dataclass(frozen=True, slots=True)
 class SearchConfig:
+    mode: Literal["fallback", "fixed", "topk"] = "fallback"
     threshold: float = 0.80
     fallback_thresholds: tuple[float, ...] = (0.75, 0.70)
     max_results: int | None = None
@@ -35,6 +52,7 @@ class SearchConfig:
     n_workers: int = 1
     fingerprint: FingerprintConfig = field(default_factory=FingerprintConfig)
     disk_chunk_size: int = 100_000
+    top_k: int = 20
 
     @property
     def minimum_threshold(self) -> float:

@@ -22,7 +22,20 @@ The ZIP is read as a stream; it is not fully extracted or loaded into RAM.
 commercial-search index --provider enamine --input data/raw/enamine/ --limit 10000
 ```
 
-Indexes are stored under `indices/<provider>/`: compressed FPSim2 fingerprints, a SQLite identifier/SMILES/property sidecar, and JSON metadata. An existing index is reused. Use `--force` only to rebuild it.
+The original Morgan index remains at `indices/<provider>/` for backward compatibility. Additional representations use `indices/<provider>/indexes/<fingerprint-parameters>/`. Each contains compressed FPSim2 fingerprints, a SQLite identifier/SMILES/property sidecar, and JSON metadata. The builder records and validates every fingerprint parameter.
+
+## Fingerprints and search modes
+
+- `morgan`: ECFP4-compatible Morgan fingerprint, radius 2 and 2048 bits by default.
+- `rdkit`: RDKit Path fingerprint, `minPath=1`, `maxPath=7` and 2048 bits by default.
+
+Three independent modes are available:
+
+- `--mode fallback`: try the configured thresholds in descending order and stop at the first level with hits.
+- `--mode fixed`: return every hit at or above exactly `--threshold`.
+- `--mode topk --top-k 20`: return the exact nearest neighbours, regardless of absolute similarity.
+
+Top-k uses FPSim2's on-disk exact top-k search at threshold zero. It scans bounded fingerprint chunks and does not load millions of RDKit molecules.
 
 Input may be CSV, TSV, or Excel and must contain `SMILES` and `molecule_id` (case-insensitive). For Excel, `Kept` is selected when present, otherwise the first sheet.
 
@@ -35,16 +48,20 @@ commercial-search search \
   --output outputs/
 ```
 
-The default fallback is 0.80, then 0.75, then 0.70 when no hit is found. `--all-above-minimum` performs one search at the minimum threshold. There is no result limit unless `--max-results` is supplied. `--cpus` (alias `--workers`) configures 1–60 FPSim2 CPU processes and `--chunk-size` bounds per-process I/O memory. Fingerprints default to Morgan radius 2 / 2048 bits; use `--fingerprint rdkit` for RDKit path fingerprints. Search settings must match the index settings.
+The default fallback is 0.80, then 0.75, then 0.70 when no hit is found. `--all-above-minimum` performs one search at the minimum threshold. There is no result limit unless `--max-results` is supplied. `--cpus` (alias `--workers`) configures 1–64 FPSim2 CPU processes and `--chunk-size` bounds per-process I/O memory. Search settings are checked against both JSON metadata and the parameters embedded in the FPSim2 HDF5 file.
 
 With multiple providers (`--providers enamine,other-provider`), every provider is searched at the same threshold. The threshold is reduced only when none of the selected providers returns a hit.
 
 ## Full index
 
-After validating the sample, build the complete catalogue (remove `--limit`). `--force` is required when replacing the sample index:
+The Morgan production index already exists and must not be rebuilt. For a future catalogue, use a new versioned root rather than `--force` on production:
 
 ```bash
-commercial-search index --provider enamine --input data/raw/enamine/ --force
+commercial-search index \
+  --provider enamine \
+  --input data/raw/enamine/202701/ \
+  --index-root indices/enamine-202701 \
+  --scratch-root /tmp/$USER/commercial-search-build
 ```
 
 Allow enough disk space for streaming decompression plus the fingerprint/metadata index. The code never keeps the complete catalogue in memory.
@@ -57,11 +74,14 @@ Index construction is streaming but FPSim2 fingerprint generation and final HDF5
 - `pipeline_input.csv`: unique structures with generated internal `CAS-…` IDs.
 - `commercial_mapping.csv`: unique candidate to original query and supplier ID relations.
 - `search_log.csv`: elapsed time, counts, and per-query errors.
+- `query_summary.csv`: per-query count, maximum, mean, median and minimum similarity, fingerprint, threshold, mode, status and runtime.
 - `commercial_candidates.sdf`: unique selected candidates.
 
 `historical_catalog_listing` means only that the entry occurs in the supplied catalogue. It is not real-time commercial availability. A future provider API must explicitly verify stock before this status changes.
 
 `commercial_matches.csv` also contains one `no_analogue_found` row for every unmatched query. Hits are ordered by similarity and include `similarity_rank`, `max_similarity`, `is_best_match`, product URL, catalogue version, and all extra input columns under the `query_property__` prefix. Thus arbitrary prediction CSVs do not require preprocessing.
+
+`commercial-search compare` searches Morgan and RDKit Path independently, forms the union of retrieved commercial candidates, recalculates both Tanimoto values over that union and writes `fingerprint_comparison.csv`. Scores remain separate and are never combined into a synthetic pharmacological score.
 
 ## Python API
 

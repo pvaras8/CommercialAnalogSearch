@@ -1,11 +1,13 @@
 """Result tables and SDF export with structural de-duplication."""
 
 import csv
+import statistics
 from pathlib import Path
 from typing import Any
 
 from rdkit import Chem
 
+from .config import SearchConfig
 from .models import QueryMolecule, SearchMatch
 
 RESULT_FIELDS = [
@@ -138,3 +140,72 @@ def export_log(rows: list[dict[str, Any]], output: Path) -> None:
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
         writer.writerows(rows)
+
+
+def export_query_summary(
+    queries: list[QueryMolecule],
+    matches: list[SearchMatch],
+    logs: list[dict[str, Any]],
+    config: SearchConfig,
+    output: Path,
+) -> None:
+    """Write one aggregate row per original molecule."""
+    fields = [
+        "query_molecule_id",
+        "query_smiles",
+        "analogue_count",
+        "max_similarity",
+        "mean_similarity",
+        "median_similarity",
+        "min_similarity",
+        "fingerprint",
+        "threshold_used",
+        "search_mode",
+        "status",
+        "elapsed_seconds",
+    ]
+    grouped: dict[str, list[SearchMatch]] = {query.molecule_id: [] for query in queries}
+    for match in matches:
+        grouped.setdefault(match.original_id, []).append(match)
+    elapsed: dict[str, float] = {}
+    errors: set[str] = set()
+    for row in logs:
+        molecule_id = str(row["molecule_id"])
+        elapsed[molecule_id] = elapsed.get(molecule_id, 0.0) + float(row["elapsed_seconds"])
+        if row["status"] == "error":
+            errors.add(molecule_id)
+    with (output / "query_summary.csv").open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        for query in queries:
+            found = grouped.get(query.molecule_id, [])
+            scores = [match.similarity for match in found]
+            threshold = (
+                found[0].threshold
+                if found
+                else 0.0
+                if config.mode == "topk"
+                else config.threshold
+                if config.mode == "fixed"
+                else config.minimum_threshold
+            )
+            writer.writerow(
+                {
+                    "query_molecule_id": query.molecule_id,
+                    "query_smiles": query.smiles,
+                    "analogue_count": len(found),
+                    "max_similarity": max(scores) if scores else "",
+                    "mean_similarity": statistics.fmean(scores) if scores else "",
+                    "median_similarity": statistics.median(scores) if scores else "",
+                    "min_similarity": min(scores) if scores else "",
+                    "fingerprint": config.fingerprint.slug,
+                    "threshold_used": threshold,
+                    "search_mode": config.mode,
+                    "status": "error"
+                    if query.molecule_id in errors
+                    else "matched"
+                    if found
+                    else "no_analogue_found",
+                    "elapsed_seconds": round(elapsed.get(query.molecule_id, 0.0), 6),
+                }
+            )

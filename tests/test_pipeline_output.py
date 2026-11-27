@@ -77,7 +77,7 @@ def test_result_schema_ranking_best_match_and_no_hit(tmp_path: Path):
 def test_provider_search_uses_one_global_fallback_threshold(monkeypatch):
     attempted: list[tuple[str, float]] = []
 
-    def fake_search(query, provider, root, config):
+    def fake_search(query, provider, root, config, local_cache_root=None):
         attempted.append((provider, config.threshold))
         if provider == "provider-a" and config.threshold == 0.8:
             return [SearchMatch("q1", "CCO", "CCO", "CCO", provider, "A1", 1.0, 0.8, "v1")]

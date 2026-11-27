@@ -48,6 +48,9 @@ def test_threshold_fallback_uses_first_successful_level(tmp_path: Path, monkeypa
     attempted: list[float] = []
 
     class FakeEngine:
+        fp_type = fp.fpsim2_type
+        fp_params = fp.fpsim2_params
+
         def on_disk_similarity(self, query, threshold, **kwargs):
             attempted.append(threshold)
             dtype = [("mol_id", "<u8"), ("coeff", "<f4")]
